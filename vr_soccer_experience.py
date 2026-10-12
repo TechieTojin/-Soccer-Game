@@ -1,619 +1,259 @@
-import numpy as np
+"""Soccer VR Experience - side-by-side stereo preview.
+
+Developed by Tojin Varkey Simson and Jaiby Mariya Jospeh.
+
+EXPERIMENTAL / PROTOTYPE. This renders the pitch twice, once per eye, side
+by side on a normal monitor. It is *not* headset support: there is no head
+tracking, no OpenXR/SteamVR integration and no lens distortion correction.
+It is meant to be viewed on a flat screen or in a phone-holder style viewer.
+
+Phase 2 fixes (see SOCCER_PROJECT_AUDIT.md, finding B13 and B14):
+
+* each eye's aspect ratio is computed from its own half-width viewport,
+  instead of `width / (height/2)`, which squashed the picture horizontally;
+* the eyes are separated along the camera's right vector rather than world
+  X, so the stereo effect survives turning;
+* the view is stored as yaw/pitch angles, clamped and re-derived each frame,
+  so it cannot drift or flip past vertical;
+* the VR toggle fires once per key press instead of every frame it is held;
+* goalposts and player limbs are the right way up (shared soccer_gl module);
+* the pitch texture is built with NumPy/OpenCV rather than a million-step
+  Python loop.
+
+Controls (unchanged):
+    WASD        move around the pitch
+    Arrow keys  look around
+    V           toggle stereo / single view
+    + / -       adjust eye separation
+    Space       kick the ball
+    Esc         exit
+"""
+
+import math
+
 import pygame
 from pygame.locals import *
 from OpenGL.GL import *
 from OpenGL.GLU import *
-import os
-import sys
-import math
-import time
-import random
-import cv2
 
-# Constants for the soccer field
-FIELD_WIDTH = 105.0
-FIELD_LENGTH = 68.0
+import soccer_gl
+from soccer_core import physics3d, stereo
+from soccer_core.formations import scene_players
+from soccer_core.pitch import Pitch3D
+
+# Kick strength, metres/second (the legacy per-frame values x 60).
+KICK_SPEED = 30.0
+KICK_LIFT = 18.0
+KICK_RANGE = 5.0
+
 
 class VRSoccerExperience:
-    def __init__(self):
-        # Initialize Pygame and OpenGL
+    def __init__(self, width=1280, height=720, fullscreen=False):
         pygame.init()
-        self.width, self.height = 1920, 1080  # Higher resolution
-        self.display = pygame.display.set_mode(
-            (self.width, self.height), 
-            DOUBLEBUF | OPENGL | pygame.RESIZABLE | pygame.FULLSCREEN
-        )
-        pygame.display.set_caption("Soccer VR Experience")
-        
+        self.width, self.height = width, height
+
+        flags = DOUBLEBUF | OPENGL
+        if fullscreen:
+            flags |= pygame.FULLSCREEN
+        self.display = pygame.display.set_mode((self.width, self.height), flags)
+        pygame.display.set_caption("Soccer VR Experience (experimental)")
+
         # OpenGL settings
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
         glEnable(GL_LIGHT0)
-        glEnable(GL_LIGHT1)  # Additional light source
+        glEnable(GL_LIGHT1)
         glEnable(GL_COLOR_MATERIAL)
-        glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        
-        # Lighting setup
+        glClearColor(0.45, 0.65, 0.88, 1.0)  # sky
+
         glLightfv(GL_LIGHT0, GL_POSITION, (0, 100, 100, 1))
-        glLightfv(GL_LIGHT0, GL_AMBIENT, (0.2, 0.2, 0.2, 1))
+        glLightfv(GL_LIGHT0, GL_AMBIENT, (0.3, 0.3, 0.3, 1))
         glLightfv(GL_LIGHT0, GL_DIFFUSE, (0.8, 0.8, 0.8, 1))
         glLightfv(GL_LIGHT1, GL_POSITION, (0, 100, -100, 1))
-        glLightfv(GL_LIGHT1, GL_AMBIENT, (0.1, 0.1, 0.1, 1))
+        glLightfv(GL_LIGHT1, GL_AMBIENT, (0.15, 0.15, 0.15, 1))
         glLightfv(GL_LIGHT1, GL_DIFFUSE, (0.6, 0.6, 0.6, 1))
-        
-        # Field texture
-        self.field_texture = self.create_field_texture()
-        
-        # Player positions with more realistic formations
-        self.player_positions = [
-            # Team 1 (Red) - 4-3-3 Formation
-            (-20, 10, (1.0, 0.0, 0.0)),   # Forward
-            (-25, 0, (1.0, 0.0, 0.0)),    # Forward
-            (-20, -10, (1.0, 0.0, 0.0)),  # Forward
-            (-35, 15, (1.0, 0.0, 0.0)),   # Midfielder
-            (-35, 0, (1.0, 0.0, 0.0)),    # Midfielder
-            (-35, -15, (1.0, 0.0, 0.0)),  # Midfielder
-            (-50, 20, (1.0, 0.0, 0.0)),   # Defender
-            (-50, 10, (1.0, 0.0, 0.0)),   # Defender
-            (-50, -10, (1.0, 0.0, 0.0)),  # Defender
-            (-50, -20, (1.0, 0.0, 0.0)),  # Defender
-            (-60, 0, (1.0, 0.0, 0.0)),    # Goalkeeper
-            
-            # Team 2 (Blue) - 4-3-3 Formation
-            (20, 10, (0.0, 0.0, 1.0)),    # Forward
-            (25, 0, (0.0, 0.0, 1.0)),     # Forward
-            (20, -10, (0.0, 0.0, 1.0)),   # Forward
-            (35, 15, (0.0, 0.0, 1.0)),    # Midfielder
-            (35, 0, (0.0, 0.0, 1.0)),     # Midfielder
-            (35, -15, (0.0, 0.0, 1.0)),   # Midfielder
-            (50, 20, (0.0, 0.0, 1.0)),    # Defender
-            (50, 10, (0.0, 0.0, 1.0)),    # Defender
-            (50, -10, (0.0, 0.0, 1.0)),   # Defender
-            (50, -20, (0.0, 0.0, 1.0)),   # Defender
-            (60, 0, (0.0, 0.0, 1.0))      # Goalkeeper
-        ]
-        
-        # Ball properties
-        self.ball_pos = [0.0, 0.5, 0.0]
-        self.ball_vel = [0.1, 0.0, 0.1]
+
+        # Scene
+        self.pitch = Pitch3D()
+        self.field_texture = soccer_gl.create_field_texture(self.pitch)
+        self.player_positions = scene_players(self.pitch)
+
+        self.ball_pos, self.ball_vel = physics3d.kickoff_state()
         self.ball_radius = 0.2
-        
-        # Camera position (VR view)
-        self.camera_pos = [0.0, 1.7, 0.0]  # Standing height
-        self.look_dir = [0.0, 0.0, -1.0]   # Looking forward
-        self.up_vector = [0.0, 1.0, 0.0]   # Up is Y-axis
-        
-        # Movement and rotation speeds
-        self.move_speed = 0.5
-        self.rot_speed = 2.0
-        
-        # VR settings
+
+        # Camera: position plus yaw/pitch angles. Storing angles (rather
+        # than repeatedly rotating a vector) keeps the look direction unit
+        # length and lets the pitch be clamped. (Audit finding B13)
+        self.camera_pos = [0.0, 1.7, 25.0]
+        self.yaw = 180.0      # look back towards the centre of the pitch
+        self.pitch_angle = -5.0
+        self.move_speed = 12.0        # metres per second
+        self.rot_speed = 90.0         # degrees per second
+
         self.vr_mode = True
-        self.ipd = 0.064  # Interpupillary distance in meters
-        
-        # Game state
-        self.game_time = 0
-        self.score = [0, 0]  # Team 1, Team 2
-        
-        # Effects
+        self.ipd = 0.064              # interpupillary distance, metres
+
+        self.score = [0, 0]
+        self.game_time = 0.0
         self.effects = []
-        
-        # Animation
-        self.animation_time = 0
+        self.animation_time = 0.0
+
         self.running = True
         self.clock = pygame.time.Clock()
-        
-        # Print modern instructions
-        print("\n⚽ Soccer VR Experience Controls:")
+
+        print("\n=== Soccer VR Experience Controls (experimental) ===")
         print("  WASD: Move around the field")
         print("  Arrow keys: Look around")
-        print("  V: Toggle VR mode (stereoscopic 3D)")
+        print("  V: Toggle stereo / single view")
         print("  +/-: Adjust eye separation")
         print("  Space: Kick ball")
         print("  ESC: Exit")
-    
-    def create_field_texture(self):
-        """Create a more detailed soccer field texture"""
-        tex_width, tex_height = 1024, 1024  # Higher resolution texture
-        
-        # Create empty array
-        texture = np.zeros((tex_height, tex_width, 3), dtype=np.uint8)
-        
-        # Field color (modern green)
-        texture[:, :] = (20, 140, 20)  # Green field
-        
-        # White lines
-        line_color = (255, 255, 255)
-        line_thickness = 8
-        
-        # Field border
-        margin = 30
-        texture[margin:margin+line_thickness, margin:-margin] = line_color  # Top
-        texture[-margin-line_thickness:-margin, margin:-margin] = line_color  # Bottom
-        texture[margin:-margin, margin:margin+line_thickness] = line_color  # Left
-        texture[margin:-margin, -margin-line_thickness:-margin] = line_color  # Right
-        
-        # Center line
-        texture[margin:-margin, (tex_width//2)-2:(tex_width//2)+3] = line_color
-        
-        # Center circle
-        center = (tex_width//2, tex_height//2)
-        radius = tex_height//6
-        for y in range(tex_height):
-            for x in range(tex_width):
-                dist = np.sqrt((x - center[0])**2 + (y - center[1])**2)
-                if abs(dist - radius) < 2:
-                    texture[y, x] = line_color
-        
-        # Add grass pattern
-        for _ in range(1000):
-            x = random.randint(0, tex_width-1)
-            y = random.randint(0, tex_height-1)
-            cv2.circle(texture, (x, y), 1, (0, 100, 0), -1)
-        
-        # Convert to RGB for OpenGL
-        texture = np.flip(texture, axis=0)
-        
-        # Create OpenGL texture
-        texture_id = glGenTextures(1)
-        glBindTexture(GL_TEXTURE_2D, texture_id)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, tex_width, tex_height, 0, GL_RGB, GL_UNSIGNED_BYTE, texture)
-        glGenerateMipmap(GL_TEXTURE_2D)
-        
-        return texture_id
-    
-    def draw_field(self):
-        """Draw the soccer field with improved visuals"""
-        # Enable texture
-        glEnable(GL_TEXTURE_2D)
-        glBindTexture(GL_TEXTURE_2D, self.field_texture)
-        
-        # Material properties
-        glMaterialfv(GL_FRONT, GL_AMBIENT, (0.2, 0.5, 0.2, 1.0))
-        glMaterialfv(GL_FRONT, GL_DIFFUSE, (0.8, 0.8, 0.8, 1.0))
-        
-        # Draw the field quad
-        glBegin(GL_QUADS)
-        glNormal3f(0, 1, 0)  # Normal pointing up
-        
-        glTexCoord2f(0, 0)
-        glVertex3f(-FIELD_WIDTH/2, 0, -FIELD_LENGTH/2)
-        
-        glTexCoord2f(1, 0)
-        glVertex3f(FIELD_WIDTH/2, 0, -FIELD_LENGTH/2)
-        
-        glTexCoord2f(1, 1)
-        glVertex3f(FIELD_WIDTH/2, 0, FIELD_LENGTH/2)
-        
-        glTexCoord2f(0, 1)
-        glVertex3f(-FIELD_WIDTH/2, 0, FIELD_LENGTH/2)
-        glEnd()
-        
-        # Disable texture
-        glDisable(GL_TEXTURE_2D)
-        
-        # Draw goalposts
-        self.draw_goalpost(-FIELD_WIDTH/2, 0, 0)
-        self.draw_goalpost(FIELD_WIDTH/2, 0, 0)
-    
-    def draw_goalpost(self, x, y, z):
-        """Draw a more detailed goalpost"""
-        goal_width = 7.32  # Standard FIFA goal width
-        goal_height = 2.44  # Standard FIFA goal height
-        post_radius = 0.1
-        
-        # Material properties
-        glMaterialfv(GL_FRONT, GL_AMBIENT, (0.2, 0.2, 0.2, 1.0))
-        glMaterialfv(GL_FRONT, GL_DIFFUSE, (1.0, 1.0, 1.0, 1.0))
-        
-        # Goal orientation
-        goal_depth = 1.5
-        direction = 1 if x < 0 else -1
-        
-        quad = gluNewQuadric()
-        gluQuadricNormals(quad, GLU_SMOOTH)
-        
-        # Left post
-        glPushMatrix()
-        glTranslatef(x + (direction * post_radius), y, z - goal_width/2)
-        glRotatef(90, 1, 0, 0)
-        gluCylinder(quad, post_radius, post_radius, goal_height, 10, 10)
-        glPopMatrix()
-        
-        # Right post
-        glPushMatrix()
-        glTranslatef(x + (direction * post_radius), y, z + goal_width/2)
-        glRotatef(90, 1, 0, 0)
-        gluCylinder(quad, post_radius, post_radius, goal_height, 10, 10)
-        glPopMatrix()
-        
-        # Crossbar
-        glPushMatrix()
-        glTranslatef(x + (direction * post_radius), y + goal_height, z - goal_width/2)
-        glRotatef(90, 0, 1, 0)
-        gluCylinder(quad, post_radius, post_radius, goal_width, 10, 10)
-        glPopMatrix()
-        
-        # Draw net (semi-transparent)
-        glMaterialfv(GL_FRONT, GL_AMBIENT, (0.9, 0.9, 0.9, 0.4))
-        glMaterialfv(GL_FRONT, GL_DIFFUSE, (0.9, 0.9, 0.9, 0.4))
-        
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        
-        # Back panel
-        glBegin(GL_QUADS)
-        glVertex3f(x + (direction * goal_depth), y, z - goal_width/2)
-        glVertex3f(x + (direction * goal_depth), y + goal_height, z - goal_width/2)
-        glVertex3f(x + (direction * goal_depth), y + goal_height, z + goal_width/2)
-        glVertex3f(x + (direction * goal_depth), y, z + goal_width/2)
-        glEnd()
-        
-        # Top panel
-        glBegin(GL_QUADS)
-        glVertex3f(x, y + goal_height, z - goal_width/2)
-        glVertex3f(x + (direction * goal_depth), y + goal_height, z - goal_width/2)
-        glVertex3f(x + (direction * goal_depth), y + goal_height, z + goal_width/2)
-        glVertex3f(x, y + goal_height, z + goal_width/2)
-        glEnd()
-        
-        # Side panels
-        glBegin(GL_QUADS)
-        glVertex3f(x, y, z - goal_width/2)
-        glVertex3f(x, y + goal_height, z - goal_width/2)
-        glVertex3f(x + (direction * goal_depth), y + goal_height, z - goal_width/2)
-        glVertex3f(x + (direction * goal_depth), y, z - goal_width/2)
-        glEnd()
-        
-        glBegin(GL_QUADS)
-        glVertex3f(x, y, z + goal_width/2)
-        glVertex3f(x, y + goal_height, z + goal_width/2)
-        glVertex3f(x + (direction * goal_depth), y + goal_height, z + goal_width/2)
-        glVertex3f(x + (direction * goal_depth), y, z + goal_width/2)
-        glEnd()
-        
-        glDisable(GL_BLEND)
-    
-    def draw_player(self, position):
-        """Draw a more detailed player model"""
-        x, z, team_color = position
-        
-        # Animation: make players move slightly
-        x += 0.3 * math.sin(self.animation_time + x * 0.3)
-        z += 0.3 * math.cos(self.animation_time + z * 0.3)
-        
-        glPushMatrix()
-        glTranslatef(x, 0, z)
-        
-        # Player body
-        glColor3f(*team_color)
-        glMaterialfv(GL_FRONT, GL_AMBIENT, (*team_color, 1.0))
-        glMaterialfv(GL_FRONT, GL_DIFFUSE, (*team_color, 1.0))
-        
-        # Body
-        glPushMatrix()
-        glTranslatef(0, 1.0, 0)
-        glRotatef(90, 1, 0, 0)
-        gluCylinder(gluNewQuadric(), 0.3, 0.3, 1.0, 10, 10)
-        glPopMatrix()
-        
-        # Head
-        glPushMatrix()
-        glTranslatef(0, 1.8, 0)
-        gluSphere(gluNewQuadric(), 0.2, 10, 10)
-        glPopMatrix()
-        
-        # Arms
-        glPushMatrix()
-        glTranslatef(0, 1.5, 0)
-        glRotatef(45 * math.sin(self.animation_time), 0, 1, 0)
-        glRotatef(90, 0, 1, 0)
-        gluCylinder(gluNewQuadric(), 0.1, 0.1, 0.5, 10, 10)
-        glPopMatrix()
-        
-        glPushMatrix()
-        glTranslatef(0, 1.5, 0)
-        glRotatef(-45 * math.sin(self.animation_time), 0, 1, 0)
-        glRotatef(90, 0, 1, 0)
-        gluCylinder(gluNewQuadric(), 0.1, 0.1, 0.5, 10, 10)
-        glPopMatrix()
-        
-        # Legs
-        glPushMatrix()
-        glTranslatef(0.2, 0.5, 0)
-        glRotatef(30 * math.sin(self.animation_time), 1, 0, 0)
-        glRotatef(90, 1, 0, 0)
-        gluCylinder(gluNewQuadric(), 0.15, 0.15, 0.8, 10, 10)
-        glPopMatrix()
-        
-        glPushMatrix()
-        glTranslatef(-0.2, 0.5, 0)
-        glRotatef(-30 * math.sin(self.animation_time), 1, 0, 0)
-        glRotatef(90, 1, 0, 0)
-        gluCylinder(gluNewQuadric(), 0.15, 0.15, 0.8, 10, 10)
-        glPopMatrix()
-        
-        glPopMatrix()
-    
-    def draw_ball(self):
-        """Draw a more detailed soccer ball"""
-        glPushMatrix()
-        glTranslatef(*self.ball_pos)
-        
-        # Ball texture
-        glColor3f(1.0, 1.0, 1.0)
-        glMaterialfv(GL_FRONT, GL_AMBIENT, (0.8, 0.8, 0.8, 1.0))
-        glMaterialfv(GL_FRONT, GL_DIFFUSE, (0.8, 0.8, 0.8, 1.0))
-        
-        # Draw pentagons and hexagons to create a soccer ball pattern
-        gluSphere(gluNewQuadric(), self.ball_radius, 20, 20)
-        
-        # Add black patches
-        glColor3f(0.0, 0.0, 0.0)
-        for i in range(12):
-            glPushMatrix()
-            glRotatef(i * 30, 0, 1, 0)
-            glRotatef(i * 15, 1, 0, 0)
-            gluPartialDisk(gluNewQuadric(), self.ball_radius * 0.9, self.ball_radius, 
-                          5, 1, 0, 72)
-            glPopMatrix()
-        
-        glPopMatrix()
-    
-    def add_effect(self, effect_type, position):
-        """Add visual effects"""
-        self.effects.append({
-            'type': effect_type,
-            'position': position.copy(),
-            'time': 0,
-            'max_time': 1.0
-        })
-    
-    def draw_effects(self):
-        """Draw visual effects"""
-        for effect in self.effects[:]:
-            if effect['time'] >= effect['max_time']:
-                self.effects.remove(effect)
-                continue
-            
-            glPushMatrix()
-            glTranslatef(*effect['position'])
-            
-            if effect['type'] == 'goal':
-                # Goal celebration effect
-                alpha = 1.0 - (effect['time'] / effect['max_time'])
-                glColor4f(1.0, 1.0, 0.0, alpha)
-                glMaterialfv(GL_FRONT, GL_AMBIENT, (1.0, 1.0, 0.0, alpha))
-                glMaterialfv(GL_FRONT, GL_DIFFUSE, (1.0, 1.0, 0.0, alpha))
-                
-                # Draw particles
-                for _ in range(10):
-                    angle = random.uniform(0, 2 * math.pi)
-                    radius = random.uniform(0, effect['time'] * 2)
-                    x = radius * math.cos(angle)
-                    y = radius * math.sin(angle)
-                    glPushMatrix()
-                    glTranslatef(x, y, 0)
-                    gluSphere(gluNewQuadric(), 0.1, 5, 5)
-                    glPopMatrix()
-            
-            effect['time'] += 0.016  # Assuming 60 FPS
-            glPopMatrix()
-    
-    def set_3d_camera(self, eye_offset=0.0):
-        """Set up the camera for stereoscopic 3D"""
+        print("\nNote: this is a side-by-side stereo preview, not headset support.")
+
+    # ------------------------------------------------------------------
+    # Camera
+    # ------------------------------------------------------------------
+
+    @property
+    def look_dir(self):
+        """Current unit look direction, derived from yaw/pitch."""
+        return stereo.direction_from_angles(self.yaw, self.pitch_angle)
+
+    def set_3d_camera(self, eye):
+        """Set projection and view matrices for one eye.
+
+        `eye` is "left", "right" or "centre".
+        """
+        aspect = stereo.viewport_aspect(self.width, self.height,
+                                        split_screen=self.vr_mode)
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        
-        # Calculate aspect ratio
-        aspect = self.width / (self.height / 2)
-        
-        # Set up perspective projection
-        gluPerspective(45, aspect, 0.1, 200.0)
-        
-        # Set up modelview matrix
+        gluPerspective(60, aspect, 0.1, 400.0)
+
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
-        
-        # Calculate eye position
-        eye_pos = [
-            self.camera_pos[0] + eye_offset,
-            self.camera_pos[1],
-            self.camera_pos[2]
-        ]
-        
-        # Set up view
-        gluLookAt(
-            eye_pos[0], eye_pos[1], eye_pos[2],
-            eye_pos[0] + self.look_dir[0],
-            eye_pos[1] + self.look_dir[1],
-            eye_pos[2] + self.look_dir[2],
-            self.up_vector[0], self.up_vector[1], self.up_vector[2]
-        )
-    
-    def handle_input(self):
-        """Handle user input for movement and interaction"""
-        keys = pygame.key.get_pressed()
-        
-        # Movement
-        if keys[pygame.K_w]:
-            self.camera_pos[0] += self.look_dir[0] * self.move_speed
-            self.camera_pos[2] += self.look_dir[2] * self.move_speed
-        if keys[pygame.K_s]:
-            self.camera_pos[0] -= self.look_dir[0] * self.move_speed
-            self.camera_pos[2] -= self.look_dir[2] * self.move_speed
-        if keys[pygame.K_a]:
-            # Strafe left
-            self.camera_pos[0] += self.look_dir[2] * self.move_speed
-            self.camera_pos[2] -= self.look_dir[0] * self.move_speed
-        if keys[pygame.K_d]:
-            # Strafe right
-            self.camera_pos[0] -= self.look_dir[2] * self.move_speed
-            self.camera_pos[2] += self.look_dir[0] * self.move_speed
-        
-        # Look around
-        if keys[pygame.K_LEFT]:
-            self.rotate_view_y(self.rot_speed)
-        if keys[pygame.K_RIGHT]:
-            self.rotate_view_y(-self.rot_speed)
-        if keys[pygame.K_UP]:
-            self.rotate_view_x(self.rot_speed)
-        if keys[pygame.K_DOWN]:
-            self.rotate_view_x(-self.rot_speed)
-        
-        # VR mode toggle
-        if keys[pygame.K_v]:
-            self.vr_mode = not self.vr_mode
-        
-        # Adjust eye separation
-        if keys[pygame.K_PLUS] or keys[pygame.K_EQUALS]:
-            self.ipd += 0.001
-        if keys[pygame.K_MINUS]:
-            self.ipd = max(0.01, self.ipd - 0.001)
-        
-        # Kick ball
-        if keys[pygame.K_SPACE]:
-            # Calculate direction to ball
-            dx = self.ball_pos[0] - self.camera_pos[0]
-            dz = self.ball_pos[2] - self.camera_pos[2]
-            dist = math.sqrt(dx*dx + dz*dz)
-            
-            if dist < 5:  # Only kick if close enough
-                self.ball_vel = [
-                    dx/dist * 0.5,
-                    0.3,
-                    dz/dist * 0.5
-                ]
-    
-    def rotate_view_y(self, angle):
-        """Rotate view around Y axis"""
-        # Convert angle to radians
-        angle_rad = math.radians(angle)
-        
-        # Calculate new look direction
-        new_x = self.look_dir[0] * math.cos(angle_rad) - self.look_dir[2] * math.sin(angle_rad)
-        new_z = self.look_dir[0] * math.sin(angle_rad) + self.look_dir[2] * math.cos(angle_rad)
-        
-        self.look_dir[0] = new_x
-        self.look_dir[2] = new_z
-    
-    def rotate_view_x(self, angle):
-        """Rotate view around X axis"""
-        # Convert angle to radians
-        angle_rad = math.radians(angle)
-        
-        # Calculate new look direction
-        new_y = self.look_dir[1] * math.cos(angle_rad) - self.look_dir[2] * math.sin(angle_rad)
-        new_z = self.look_dir[1] * math.sin(angle_rad) + self.look_dir[2] * math.cos(angle_rad)
-        
-        self.look_dir[1] = new_y
-        self.look_dir[2] = new_z
-    
+
+        look = self.look_dir
+        eye_pos = stereo.eye_position(self.camera_pos, look, self.ipd, eye)
+        gluLookAt(eye_pos[0], eye_pos[1], eye_pos[2],
+                  eye_pos[0] + look[0], eye_pos[1] + look[1], eye_pos[2] + look[2],
+                  0.0, 1.0, 0.0)
+
+    # ------------------------------------------------------------------
+    # Input
+    # ------------------------------------------------------------------
+
     def handle_events(self):
-        """Handle pygame events"""
+        """Discrete key presses (toggles and one-shot actions)."""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     self.running = False
-    
-    def update_ball_physics(self):
-        """Update ball physics with more realistic movement"""
-        # Gravity
-        self.ball_vel[1] -= 0.01
-        
-        # Update position
-        for i in range(3):
-            self.ball_pos[i] += self.ball_vel[i]
-        
-        # Ground collision
-        if self.ball_pos[1] < self.ball_radius:
-            self.ball_pos[1] = self.ball_radius
-            self.ball_vel[1] = -self.ball_vel[1] * 0.8  # Bounce with energy loss
-        
-        # Field boundaries
-        if abs(self.ball_pos[0]) > FIELD_WIDTH/2:
-            self.ball_vel[0] = -self.ball_vel[0] * 0.8
-            self.ball_pos[0] = np.sign(self.ball_pos[0]) * (FIELD_WIDTH/2 - 0.1)
-        
-        if abs(self.ball_pos[2]) > FIELD_LENGTH/2:
-            self.ball_vel[2] = -self.ball_vel[2] * 0.8
-            self.ball_pos[2] = np.sign(self.ball_pos[2]) * (FIELD_LENGTH/2 - 0.1)
-        
-        # Friction
-        self.ball_vel[0] *= 0.99
-        self.ball_vel[2] *= 0.99
-        
-        # Check for goals
-        if abs(self.ball_pos[0]) > FIELD_WIDTH/2 - 1 and abs(self.ball_pos[2]) < 7.32/2:
-            if self.ball_pos[0] < 0:
-                self.score[1] += 1
-            else:
-                self.score[0] += 1
-            self.add_effect('goal', self.ball_pos.copy())
-            self.reset_ball()
-    
-    def reset_ball(self):
-        """Reset ball to center"""
-        self.ball_pos = [0.0, 0.5, 0.0]
-        self.ball_vel = [0.1, 0.0, 0.1]
-    
-    def run(self):
-        """Main game loop"""
-        while self.running:
-            self.handle_events()
-            self.handle_input()
-            
-            # Clear the screen
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-            
-            if self.vr_mode:
-                # Left eye
-                glViewport(0, 0, self.width//2, self.height)
-                self.set_3d_camera(-self.ipd/2)
-                self.draw_scene()
-                
-                # Right eye
-                glViewport(self.width//2, 0, self.width//2, self.height)
-                self.set_3d_camera(self.ipd/2)
-                self.draw_scene()
-            else:
-                # Single view
-                glViewport(0, 0, self.width, self.height)
-                self.set_3d_camera(0)
-                self.draw_scene()
-            
-            # Update animation
-            self.animation_time += 0.016
-            self.game_time += 0.016
-            
-            # Update ball physics
-            self.update_ball_physics()
-            
-            pygame.display.flip()
-            self.clock.tick(60)
-        
-        pygame.quit()
-    
+                elif event.key == pygame.K_v:
+                    # Edge-triggered: polling this with get_pressed() used to
+                    # flip the mode on every frame the key was held down.
+                    self.vr_mode = not self.vr_mode
+                elif event.key == pygame.K_SPACE:
+                    self.kick_ball()
+
+    def handle_input(self, dt):
+        """Continuous movement and look controls."""
+        keys = pygame.key.get_pressed()
+
+        forward = (keys[pygame.K_w] - keys[pygame.K_s]) * self.move_speed * dt
+        strafe = (keys[pygame.K_d] - keys[pygame.K_a]) * self.move_speed * dt
+        if forward or strafe:
+            self.camera_pos = stereo.move(self.camera_pos, self.look_dir,
+                                          forward, strafe)
+            # Stay within sight of the pitch.
+            limit_x = self.pitch.half_length + 15.0
+            limit_z = self.pitch.half_width + 15.0
+            self.camera_pos[0] = max(-limit_x, min(limit_x, self.camera_pos[0]))
+            self.camera_pos[2] = max(-limit_z, min(limit_z, self.camera_pos[2]))
+
+        self.yaw += (keys[pygame.K_RIGHT] - keys[pygame.K_LEFT]) * self.rot_speed * dt
+        self.pitch_angle = stereo.clamp_pitch(
+            self.pitch_angle + (keys[pygame.K_UP] - keys[pygame.K_DOWN])
+            * self.rot_speed * dt)
+
+        if keys[pygame.K_PLUS] or keys[pygame.K_EQUALS]:
+            self.ipd = min(0.2, self.ipd + 0.02 * dt)
+        if keys[pygame.K_MINUS]:
+            self.ipd = max(0.01, self.ipd - 0.02 * dt)
+
+    def kick_ball(self):
+        """Kick the ball away from the viewer, if close enough."""
+        dx = self.ball_pos[0] - self.camera_pos[0]
+        dz = self.ball_pos[2] - self.camera_pos[2]
+        distance = math.hypot(dx, dz)
+        if 0 < distance < KICK_RANGE:
+            self.ball_vel = [dx / distance * KICK_SPEED,
+                             KICK_LIFT,
+                             dz / distance * KICK_SPEED]
+
+    # ------------------------------------------------------------------
+    # Simulation and drawing
+    # ------------------------------------------------------------------
+
+    def update(self, dt):
+        """Advance ball physics, goals and effects by `dt` seconds."""
+        physics3d.step_ball(self.ball_pos, self.ball_vel, dt, self.pitch,
+                            self.ball_radius)
+
+        side = physics3d.detect_goal(self.ball_pos, self.pitch)
+        if side is not None:
+            self.score[1 if side == "left" else 0] += 1
+            soccer_gl.add_effect(self.effects, 'goal', self.ball_pos)
+            self.ball_pos, self.ball_vel = physics3d.kickoff_state()
+
+        soccer_gl.update_effects(self.effects, dt)
+        self.animation_time += dt
+        self.game_time += dt
+
     def draw_scene(self):
-        """Draw the complete scene"""
-        # Draw field
-        self.draw_field()
-        
-        # Draw players
-        for pos in self.player_positions:
-            self.draw_player(pos)
-        
-        # Draw ball
-        self.draw_ball()
-        
-        # Draw effects
-        self.draw_effects()
+        """Draw the whole scene from the current camera."""
+        soccer_gl.draw_field(self.field_texture, self.pitch)
+        soccer_gl.draw_goals(self.pitch)
+        soccer_gl.draw_players(self.player_positions, self.animation_time)
+        soccer_gl.draw_ball(self.ball_pos, self.ball_radius)
+        soccer_gl.draw_effects(self.effects)
+
+    def render(self):
+        """Render one frame, in stereo or mono."""
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+        if self.vr_mode:
+            half_width = self.width // 2
+            glViewport(0, 0, half_width, self.height)
+            self.set_3d_camera("left")
+            self.draw_scene()
+
+            glViewport(half_width, 0, half_width, self.height)
+            self.set_3d_camera("right")
+            self.draw_scene()
+        else:
+            glViewport(0, 0, self.width, self.height)
+            self.set_3d_camera("centre")
+            self.draw_scene()
+
+        pygame.display.flip()
+
+    def run(self):
+        """Main loop."""
+        while self.running:
+            # Cap dt so a stall cannot teleport the ball.
+            dt = min(self.clock.tick(60) / 1000.0, 0.05)
+            self.handle_events()
+            self.handle_input(dt)
+            self.update(dt)
+            self.render()
+
+        pygame.quit()
+
 
 if __name__ == "__main__":
     app = VRSoccerExperience()
-    app.run() 
+    app.run()

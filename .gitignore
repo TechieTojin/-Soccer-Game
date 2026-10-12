@@ -1,3 +1,6 @@
+# Inherited ignore rules from the "Soccer on Your Tabletop" pipeline.
+# These keep generated pipeline artefacts (masks, point clouds, meshes,
+# model weights, intermediate data) out of the repository.
 *.pyc
 .history.*
 .idea/
@@ -22,3 +25,25 @@
 *.pdf
 *.ipynb
 
+# --- Project files that must be committable -------------------------------
+# The broad patterns above (*.txt, *.png, *.json, ...) would otherwise
+# silently swallow requirements files, tests, docs and screenshots.
+# (Audit finding B23)
+!requirements.txt
+!requirements-*.txt
+!tests/
+!tests/**
+!docs/
+!docs/**
+!.github/
+!.github/**
+
+# Python tooling artefacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/

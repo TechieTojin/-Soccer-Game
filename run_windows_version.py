@@ -1,128 +1,205 @@
+"""Unified launcher for the Soccer AR/VR Experience.
+
+Gives access to every mode that exists in this repository:
+
+    1. 2D Soccer Game        -> soccer_game.py
+    2. 3D Field Viewer       -> soccer3d_viewer.py
+    3. AR Prototype          -> ar_soccer_experience.py
+    4. VR Stereo Prototype   -> vr_soccer_experience.py
+    5. Dataset Image Viewer  -> run_soccer_on_table.py
+
+Usage:
+    python run_windows_version.py              # interactive menu
+    python run_windows_version.py --mode 2d    # launch one mode directly
+    python run_windows_version.py --list       # list modes and exit
+
+All script paths are resolved relative to this file, so the launcher works
+regardless of the current working directory. (Audit findings B3, B18)
+"""
+
+import argparse
 import os
-import sys
 import subprocess
+import sys
 import time
+from pathlib import Path
+
+# Directory containing this launcher - all modes are resolved against it.
+BASE_DIR = Path(__file__).resolve().parent
+
+# mode key -> (menu label, script filename, short description)
+MODES = {
+    "2d": ("2D Soccer Game", "soccer_game.py",
+           "Playable top-down match with physics, stamina and scoring"),
+    "3d": ("3D Field Viewer", "soccer3d_viewer.py",
+           "Orbiting OpenGL view of the pitch and formations"),
+    "ar": ("AR Prototype", "ar_soccer_experience.py",
+           "EXPERIMENTAL - webcam + printed ArUco marker (no physical-marker test yet)"),
+    "vr": ("VR Stereo Prototype", "vr_soccer_experience.py",
+           "EXPERIMENTAL - side-by-side stereo preview, no headset support"),
+    "markers": ("Generate AR Markers", "tools/make_markers.py",
+                "Write printable ArUco markers to ar_markers/ (needed for AR)"),
+    "viewer": ("Dataset Image Viewer", "run_soccer_on_table.py",
+               "Browse the Barcelona dataset frames (needs the dataset)"),
+}
+
+# Order used by the interactive menu
+MENU_ORDER = ["2d", "3d", "ar", "vr", "markers", "viewer"]
+
 
 def clear_screen():
     """Clear the terminal screen"""
     os.system('cls' if os.name == 'nt' else 'clear')
 
+
 def print_header():
     """Display the project header"""
     clear_screen()
     print("\n" + "=" * 80)
-    print(" " * 28 + "SOCCER ON YOUR TABLETOP")
-    print(" " * 32 + "Windows Version")
+    print(" " * 26 + "SOCCER AR/VR EXPERIENCE")
+    print(" " * 34 + "Launcher")
     print("=" * 80 + "\n")
 
+
 def check_dependencies():
-    """Check if required dependencies are installed"""
-    try:
-        import numpy
-        import matplotlib
-        import PIL
-        import pygame
-        import OpenGL.GL
-        return True
-    except ImportError as e:
-        print(f"Missing dependency: {e}")
-        print("\nPlease install all required dependencies:")
-        print("py -m pip install numpy matplotlib pillow pygame pyopengl")
+    """Check that the core runtime dependencies are importable.
+
+    Returns a list of missing package names (empty when everything is present).
+    PyOpenGL and OpenCV are only needed by some modes, so a missing one is
+    reported but does not block the launcher.
+    """
+    missing = []
+    for module_name, package_name in [
+        ("pygame", "pygame"),
+        ("numpy", "numpy"),
+        ("cv2", "opencv-contrib-python"),
+        ("OpenGL.GL", "PyOpenGL"),
+        ("PIL", "Pillow"),
+        ("matplotlib", "matplotlib"),
+    ]:
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(package_name)
+    return missing
+
+
+def script_path(mode):
+    """Absolute path to the script implementing `mode`."""
+    return BASE_DIR / MODES[mode][1]
+
+
+def run_mode(mode, pause=True):
+    """Launch the script for `mode` as a child process.
+
+    Returns True when the script exited cleanly.
+    """
+    label, filename, _ = MODES[mode]
+    path = script_path(mode)
+
+    if not path.exists():
+        print(f"\nError: {filename} was not found at {path}")
+        if pause:
+            input("\nPress Enter to continue...")
         return False
 
-def check_data():
-    """Check if barcelona dataset is available"""
-    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'barcelona', 'barcelona')
-    if not os.path.exists(data_dir):
-        print("Dataset not found!")
-        print("Please download and extract the barcelona.zip dataset.")
-        print("\nDownload command:")
-        print("Invoke-WebRequest -Uri \"http://grail.cs.washington.edu/projects/soccer/barcelona.zip\" -OutFile \"barcelona.zip\"")
-        print("\nExtract command:")
-        print("Expand-Archive -Path barcelona.zip -DestinationPath barcelona")
-        return False
-    return True
+    clear_screen()
+    print(f"Starting {label} ({filename})...\n")
+    ok = False
+    try:
+        # cwd is set to the project root so modes that use relative asset
+        # paths behave the same however the launcher was started.
+        subprocess.run([sys.executable, str(path)], check=True, cwd=str(BASE_DIR))
+        ok = True
+    except subprocess.CalledProcessError as e:
+        print(f"\n{label} exited with an error (code {e.returncode}).")
+        print("See the console output above for details.")
+    except KeyboardInterrupt:
+        print("\nTerminated by user.")
+    except OSError as e:
+        print(f"\nCould not start {filename}: {e}")
+
+    if pause:
+        print("\nPress Enter to return to the main menu...")
+        input()
+    return ok
+
 
 def display_menu():
     """Display the main menu"""
     print("Please select an option:\n")
-    print("1. Run Image Viewer (displays soccer frames)")
-    print("2. Run 3D Field Visualization (displays 3D soccer field)")
-    print("3. Read Documentation")
-    print("4. Exit")
-    print("\nEnter your choice [1-4]: ", end="")
+    for i, mode in enumerate(MENU_ORDER, start=1):
+        label, _, description = MODES[mode]
+        print(f"{i}. {label}")
+        print(f"   {description}")
+    print(f"{len(MENU_ORDER) + 1}. Exit")
+    print(f"\nEnter your choice [1-{len(MENU_ORDER) + 1}]: ", end="")
 
-def run_script(script_name):
-    """Run the specified Python script"""
-    clear_screen()
-    print(f"Starting {script_name}...\n")
-    try:
-        subprocess.run([sys.executable, script_name], check=True)
-    except subprocess.CalledProcessError:
-        print(f"\nError running {script_name}. Please check the console output above.")
-    except KeyboardInterrupt:
-        print("\nScript was terminated by user.")
-    
-    print("\nPress Enter to return to the main menu...")
-    input()
 
-def show_documentation():
-    """Display the documentation"""
-    clear_screen()
-    try:
-        with open("README_WINDOWS.md", "r") as f:
-            content = f.read()
-        print(content)
-    except FileNotFoundError:
-        print("Documentation file not found.")
-    
-    print("\nPress Enter to return to the main menu...")
-    input()
-
-def main():
-    """Main function"""
-    print_header()
-    
-    # Check dependencies
-    if not check_dependencies():
-        print("\nPress Enter to exit...")
-        input()
-        return
-    
-    # Check for dataset
-    if not check_data():
-        print("\nPress Enter to continue anyway or Ctrl+C to exit...")
-        try:
-            input()
-        except KeyboardInterrupt:
-            return
-    
+def interactive_menu():
+    """Run the interactive launcher menu"""
     while True:
         print_header()
         display_menu()
-        
+
         try:
             choice = input().strip()
-            
-            if choice == '1':
-                run_script('run_soccer_on_table.py')
-            elif choice == '2':
-                run_script('soccer3d_viewer.py')
-            elif choice == '3':
-                show_documentation()
-            elif choice == '4':
-                print("\nExiting Soccer On Your Tabletop - Windows Version...")
-                break
-            else:
-                print("\nInvalid choice. Please enter a number between 1 and 4.")
-                time.sleep(1.5)
-        except KeyboardInterrupt:
-            print("\n\nExiting Soccer On Your Tabletop - Windows Version...")
-            break
+        except (KeyboardInterrupt, EOFError):
+            print("\n\nExiting Soccer AR/VR Experience...")
+            return
+
+        if choice == str(len(MENU_ORDER) + 1):
+            print("\nExiting Soccer AR/VR Experience...")
+            return
+
+        if choice.isdigit() and 1 <= int(choice) <= len(MENU_ORDER):
+            run_mode(MENU_ORDER[int(choice) - 1])
+        else:
+            print(f"\nInvalid choice. Please enter a number between 1 and "
+                  f"{len(MENU_ORDER) + 1}.")
+            time.sleep(1.5)
+
+
+def main():
+    """Main function"""
+    parser = argparse.ArgumentParser(
+        description="Launcher for the Soccer AR/VR Experience.")
+    parser.add_argument(
+        "--mode", choices=sorted(MODES),
+        help="Launch a mode directly instead of showing the menu.")
+    parser.add_argument(
+        "--list", action="store_true",
+        help="List the available modes and exit.")
+    parser.add_argument(
+        "--skip-checks", action="store_true",
+        help="Skip the dependency check on start-up.")
+    args = parser.parse_args()
+
+    if args.list:
+        for mode in MENU_ORDER:
+            label, filename, description = MODES[mode]
+            print(f"{mode:<7} {label:<22} {filename:<26} {description}")
+        return 0
+
+    if not args.skip_checks:
+        missing = check_dependencies()
+        if missing:
+            print("Warning: missing packages: " + ", ".join(missing))
+            print("Some modes will not start. Install them with:")
+            print("    pip install -r requirements.txt\n")
+
+    if args.mode:
+        # Direct launch: no menu, no "press Enter", propagate the exit status.
+        return 0 if run_mode(args.mode, pause=False) else 1
+
+    print_header()
+    interactive_menu()
+    return 0
+
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except KeyboardInterrupt:
         print("\n\nProgram terminated by user.")
-        sys.exit(0) 
+        sys.exit(0)

@@ -1,0 +1,23 @@
+# OPTIONAL dependencies for the inherited "Soccer on Your Tabletop"
+# research pipeline (soccer3d/, utils/, demo/) by Rematas et al., CVPR 2018.
+#
+# These are NOT required to run the 2D game, 3D viewer, AR or VR modes.
+# Install only if you intend to work on the reconstruction pipeline:
+#     pip install -r requirements-pipeline.txt
+#
+# Note: the pipeline additionally needs components that are not installable
+# via pip - Detectron (caffe2), OpenPose, and the C++/Cython extensions built
+# by compile.sh - and its demo scripts assume Linux paths. It has not been
+# verified on Windows.
+
+scipy
+cython
+glog
+pyyaml
+shapely
+tqdm
+torch
+torchvision
+visdom
+openmesh
+glumpy

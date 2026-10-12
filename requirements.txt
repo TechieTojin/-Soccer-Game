@@ -1,15 +1,18 @@
-numpy
-scipy
-matplotlib
-cython
-glog
-pyyaml
-shapely
-tqdm
-glog
-torch
-torchvision
-visdom
-openmesh
-glumpy
-pyopengl
+# Runtime dependencies for the Soccer AR/VR Experience application
+# (2D game, 3D viewer, AR prototype, VR stereo prototype).
+#
+# Install with:  pip install -r requirements.txt
+#
+# The heavyweight research-pipeline dependencies (PyTorch, openmesh, ...)
+# live in requirements-pipeline.txt and are NOT needed to play the game.
+# Development/test tooling lives in requirements-dev.txt.
+
+numpy>=1.24,<3
+pygame>=2.5,<3
+PyOpenGL>=3.1.6,<4
+# opencv-contrib-python provides cv2 *and* cv2.aruco, used by the AR mode.
+# Do not also install opencv-python: they overwrite each other's cv2 module.
+# >=4.8 so the current ArUco API (ArucoDetector) is available.
+opencv-contrib-python>=4.8,<6
+Pillow>=10,<12
+matplotlib>=3.7,<4

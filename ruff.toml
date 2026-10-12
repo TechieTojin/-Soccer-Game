@@ -1,0 +1,49 @@
+# Lint configuration for the game/application code only.
+#
+# The inherited "Soccer on Your Tabletop" research pipeline (soccer3d/,
+# utils/, demo/) is deliberately excluded: it is third-party research code
+# that this project does not maintain, it needs Detectron/OpenPose/CUDA, and
+# utils/nms/pycocotools/coco.py is still Python 2 source that cannot even be
+# parsed by Python 3. Linting it would produce hundreds of findings nobody
+# intends to act on and would hide real problems in our own code.
+
+line-length = 100
+target-version = "py310"
+
+extend-exclude = [
+    "soccer3d",
+    "utils",
+    "demo",
+    "barcelona",
+]
+
+[lint]
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes (undefined names, unused imports, ...)
+    "W",      # pycodestyle warnings
+    "B",      # flake8-bugbear (likely bugs)
+    "UP",     # pyupgrade
+]
+
+ignore = [
+    "E501",   # line length is handled by the formatter, not enforced here
+    "E741",   # ambiguous variable names (l, I) - not worth churn
+]
+
+[lint.per-file-ignores]
+# The OpenGL API is designed around star imports; spelling out hundreds of
+# gl* names would be far less readable than the convention everyone uses.
+# E702: immediate-mode GL reads far better with each texture coordinate on
+# the same line as the vertex it belongs to.
+"soccer_gl.py" = ["F403", "F405", "E702"]
+"ar_soccer_experience.py" = ["F403", "F405", "E702"]
+"vr_soccer_experience.py" = ["F403", "F405", "E702"]
+"soccer3d_viewer.py" = ["F403", "F405", "E702"]
+"soccer_game.py" = ["F403", "F405"]
+# check_dependencies() imports packages purely to see whether they are
+# installed, so the "unused import" is the whole point.
+"modern_interface.py" = ["F401"]
+# W293: the flagged lines are blank lines *inside* a generated HTML string,
+# not source code.
+"setup_ar_vr.py" = ["W293"]
